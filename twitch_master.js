@@ -1,6 +1,7 @@
 var fs  = require('fs');
 var irc = require('irc');
 var pub = require('./lib/comm').sender();
+var rules = require('./lib/rules');
 
 var command_interval = 15;
 
@@ -23,8 +24,9 @@ process.stdin.on('data', function(data) {
   process.stdout.write('Control: ' + data);
   var args = data.toString().split(' ');
   switch(args[0].trim()) {
-    case 'map_load':
-      map_load();
+    case 'rules_load':
+    case 'map_load': // let's stay backwards compatible ;)
+      rules.reload();
       break;
 
     case 'reset_voting':
@@ -57,24 +59,6 @@ process.stdin.on('data', function(data) {
   }
 });
 
-// Load json command mapping
-var map = {}
-
-function map_load() {
-  fs.exists('map.json', function() {
-    try {
-      var map_new = JSON.parse(fs.readFileSync('map.json', 'utf8'));
-      map = map_new;
-      console.log('(Re)loaded map.json');
-    } catch (ex) {
-      console.log('Could not load map.json');
-      console.log(ex);
-    }
-  });
-}
-
-map_load();
-
 // Load json config
 var config = JSON.parse(fs.readFileSync('config.json', 'utf8'));
 
@@ -94,8 +78,9 @@ var last_command;
 
 twitch_chat.addListener('message#' + config['nick'], function(from, msg) {
   msg = msg.trim();
-  if (map[msg] != null) {
-    console.log(from + ': ' + msg + ' -> ' + map[msg]);
+  var cmd = rules.resolve(msg);
+  if (cmd != null) {
+    console.log(from + ': ' + msg + ' -> ' + cmd);
     pub.send(['client-console', '> ' + from + ': ' + msg]);
     last_tally[from.trim()] = msg;
     last_command = msg;
@@ -212,7 +197,7 @@ function processCommand() {
         pub.send(['client-status', 'VOTING SUCCEEDED: ' + voting_command]);
 
         // Replace VOTE
-        var cmd = map[voting_command].replace(/^VOTE /, '');
+        var cmd = rules.resolve(voting_command).replace(/^VOTE /, '');
 
         // Set mode
         if ((cmd == 'democracy' || cmd == 'anarchy')) {
@@ -231,20 +216,21 @@ function processCommand() {
       }
       voting_command = null;
 
-    } else if (map[selected_command].indexOf("VOTE") == 0) {
-      // This command requires a vote
-      console.log('Voting on command: ' + selected_command);
-      twitch_chat.say('#' + config['nick'], 'Vote \'yes\' to run this command: ' + selected_command);
-      pub.send(['client-status', 'VOTING ON COMMAND (yes to run this command): ' + selected_command]);
-      voting_command = selected_command;
-      last_tally = {}; // in case we are in anarchy
-      
-    } else if (map[selected_command] != "") {
-      // Normal command, not NOOP
-      console.log('Sending to qemu: ' + map[selected_command]);
-      pub.send(['qemu-master', map[selected_command]]);
+    } else {
+      var cmd = rules.resolve(selected_command) || "";
+      if (cmd.indexOf("VOTE ") == 0) {
+        // This command requires a vote
+        console.log('Voting on command: ' + selected_command);
+        twitch_chat.say('#' + config['nick'], 'Vote \'yes\' to run this command: ' + selected_command);
+        pub.send(['client-status', 'VOTING ON COMMAND (yes to run this command): ' + selected_command]);
+        voting_command = selected_command;
+        last_tally = {}; // in case we are in anarchy
+      } else if (cmd != "") {
+        // Normal command, not NOOP
+        console.log('Sending to qemu: ' + cmd);
+        pub.send(['qemu-master', cmd]);
+      }
     }
-    
   } else {
     console.log('Not enough votes');
     twitch_chat.say('#' + config['nick'], 'Not enough votes');
